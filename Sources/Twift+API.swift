@@ -164,139 +164,148 @@ extension Twift {
     
     case bookmarks(_ userId: User.ID)
     case deleteBookmark(userId: User.ID, tweetId: Tweet.ID)
+      
+      case dmConversations
+      case sendDM(conversationId: String)
     
     var resolvedPath: (path: String, queryItems: [URLQueryItem]?) {
-      switch self {
-      case .tweet(let id):
-        return (path: "/2/tweets/\(id)", queryItems: nil)
-      case .tweets(let ids):
-        if ids.isEmpty {
-          return (path: "/2/tweets", queryItems: nil)
-        } else {
-          return (path: "/2/tweets",
-                  queryItems: [URLQueryItem(name: "ids", value: ids.map(\.trimmed).joined(separator: ","))])
+        switch self {
+        case .tweet(let id):
+            return (path: "/2/tweets/\(id)", queryItems: nil)
+        case .tweets(let ids):
+            if ids.isEmpty {
+                return (path: "/2/tweets", queryItems: nil)
+            } else {
+                return (path: "/2/tweets",
+                        queryItems: [URLQueryItem(name: "ids", value: ids.map(\.trimmed).joined(separator: ","))])
+            }
+        case .tweetHidden(let id):
+            return (path: "/2/tweets/\(id)/hidden", queryItems: nil)
+            
+        case .timeline(let id):
+            return (path: "/2/users/\(id)/tweets", queryItems: nil)
+        case .mentions(let id):
+            return (path: "/2/users/\(id)/mentions", queryItems: nil)
+        case .reverseChronologicalTimeline(let id):
+            return (path: "/2/users/\(id)/timelines/reverse_chronological", queryItems: nil)
+            
+        case .users(let ids):
+            return (path: "/2/users",
+                    queryItems: [URLQueryItem(name: "ids", value: ids.map(\.trimmed).joined(separator: ","))])
+        case .usersByUsernames(let usernames):
+            return (path: "/2/users/by", queryItems: [URLQueryItem(name: "usernames", value: usernames.map(\.trimmed).joined(separator: ","))])
+        case .singleUserById(let userId):
+            return (path: "/2/users/\(userId)", queryItems: nil)
+        case .singleUserByUsername(let username):
+            return (path: "/2/users/by/username/\(username)", queryItems: nil)
+        case .me:
+            return (path: "/2/users/me", queryItems: nil)
+            
+        case .following(let id):
+            return (path: "/2/users/\(id)/following", queryItems: nil)
+        case .followers(let id):
+            return (path: "/2/users/\(id)/followers", queryItems: nil)
+        case .deleteFollow(sourceUserId: let sourceUserId, targetUserId: let targetUserId):
+            return (path: "/2/users/\(sourceUserId)/following/\(targetUserId)", queryItems: nil)
+            
+        case .blocking(let id):
+            return (path: "/2/users/\(id)/blocking", queryItems: nil)
+        case .deleteBlock(let sourceUserId, let targetUserId):
+            return (path: "/2/users/\(sourceUserId)/blocking/\(targetUserId)", queryItems: nil)
+            
+        case .muting(let id):
+            return (path: "/2/users/\(id)/muting", queryItems: nil)
+        case .deleteMute(let sourceUserId, let targetUserId):
+            return (path: "/2/users/\(sourceUserId)/muting/\(targetUserId)", queryItems: nil)
+            
+        case .volumeStream:
+            return (path: "/2/tweets/sample/stream", queryItems: nil)
+        case .filteredStream:
+            return (path: "/2/tweets/search/stream", queryItems: nil)
+        case .filteredStreamRules:
+            return (path: "/2/tweets/search/stream/rules", queryItems: nil)
+        case .searchRecent:
+            return (path: "/2/tweets/search/recent", queryItems: nil)
+        case .searchAll:
+            return (path: "/2/tweets/search/all", queryItems: nil)
+            
+        case .userLikes(let id):
+            return (path: "/2/users/\(id)/likes", queryItems: nil)
+        case .deleteUserLikes(let userId, let tweetId):
+            return (path: "/2/users/\(userId)/likes/\(tweetId)", queryItems: nil)
+        case .likingUsers(let id):
+            return (path: "/2/tweets/\(id)/liking_users", queryItems: nil)
+        case .likedTweets(let id):
+            return (path: "/2/users/\(id)/liked_tweets", queryItems: nil)
+            
+        case .retweets(let userId, let tweetId):
+            if let tweetId = tweetId {
+                return (path: "/2/users/\(userId)/retweets/\(tweetId)", queryItems: nil)
+            } else {
+                return (path: "/2/users/\(userId)/retweets", queryItems: nil)
+            }
+        case .retweetedBy(let id):
+            return (path: "/2/tweets/\(id)/retweeted_by", queryItems: nil)
+            
+        case .quoteTweets(let id):
+            return (path: "/2/tweets/\(id)/quote_tweets", queryItems: nil)
+            
+        case .list(let id):
+            return (path: "/2/lists/\(id)", queryItems: nil)
+        case .listTweets(let id):
+            return (path: "/2/lists/\(id)/tweets", queryItems: nil)
+        case .listFollowers(let id):
+            return (path: "/2/lists/\(id)/followers", queryItems: nil)
+        case .userOwnedLists(let id):
+            return (path: "/2/users/\(id)/owned_lists", queryItems: nil)
+        case .userListMemberships(let id):
+            return (path: "/2/users/\(id)/list_memberships", queryItems: nil)
+        case .listMembers(let id):
+            return (path: "/2/lists/\(id)/members", queryItems: nil)
+        case .removeListMember(let listId, let userId):
+            return (path: "/2/lists/\(listId)/members/\(userId)", queryItems: nil)
+            
+        case .userPinnedLists(let userId, let listId):
+            if let listId = listId {
+                return (path: "/2/users/\(userId)/pinned_lists/\(listId)", queryItems: nil)
+            } else {
+                return (path: "/2/users/\(userId)/pinned_lists", queryItems: nil)
+            }
+        case .createList:
+            return (path: "/2/lists", queryItems: nil)
+        case .userFollowingLists(let userId, let listId):
+            if let listId = listId {
+                return (path: "/2/users/\(userId)/followed_lists/\(listId)", queryItems: nil)
+            } else {
+                return (path: "/2/users/\(userId)/followed_lists", queryItems: nil)
+            }
+            
+        case .spaces(let id, let subpath):
+            if let id = id {
+                return (path: "/2/spaces/\(id)\(subpath == nil ? "" : "/\(subpath!.rawValue)")", queryItems: nil)
+            } else {
+                return (path: "/2/spaces/", queryItems: nil)
+            }
+            
+        case .searchSpaces:
+            return (path: "/2/spaces/search", queryItems: nil)
+        case.spacesByCreatorIds:
+            return (path: "/2/spaces/by/creator_ids", queryItems: nil)
+            
+        case .mediaMetadataCreate:
+            return (path: "/1.1/media/metadata/create.json", queryItems: nil)
+            
+        case .bookmarks(let userId):
+            return (path: "/2/users/\(userId)/bookmarks", queryItems: nil)
+        case .deleteBookmark(let userId, let tweetId):
+            return (path: "/2/users/\(userId)/bookmarks/\(tweetId)", queryItems: nil)
+        case .dmConversations:
+          return (path: "/2/dm_conversations", queryItems: nil)
+        case .sendDM(let conversationId):
+          return (path: "/2/dm_conversations/\(conversationId)/messages", queryItems: nil)
+            
+            
         }
-      case .tweetHidden(let id):
-        return (path: "/2/tweets/\(id)/hidden", queryItems: nil)
-        
-      case .timeline(let id):
-        return (path: "/2/users/\(id)/tweets", queryItems: nil)
-      case .mentions(let id):
-        return (path: "/2/users/\(id)/mentions", queryItems: nil)
-      case .reverseChronologicalTimeline(let id):
-        return (path: "/2/users/\(id)/timelines/reverse_chronological", queryItems: nil)
-        
-      case .users(let ids):
-        return (path: "/2/users",
-                queryItems: [URLQueryItem(name: "ids", value: ids.map(\.trimmed).joined(separator: ","))])
-      case .usersByUsernames(let usernames):
-        return (path: "/2/users/by", queryItems: [URLQueryItem(name: "usernames", value: usernames.map(\.trimmed).joined(separator: ","))])
-      case .singleUserById(let userId):
-        return (path: "/2/users/\(userId)", queryItems: nil)
-      case .singleUserByUsername(let username):
-        return (path: "/2/users/by/username/\(username)", queryItems: nil)
-      case .me:
-        return (path: "/2/users/me", queryItems: nil)
-        
-      case .following(let id):
-        return (path: "/2/users/\(id)/following", queryItems: nil)
-      case .followers(let id):
-        return (path: "/2/users/\(id)/followers", queryItems: nil)
-      case .deleteFollow(sourceUserId: let sourceUserId, targetUserId: let targetUserId):
-        return (path: "/2/users/\(sourceUserId)/following/\(targetUserId)", queryItems: nil)
-        
-      case .blocking(let id):
-        return (path: "/2/users/\(id)/blocking", queryItems: nil)
-      case .deleteBlock(let sourceUserId, let targetUserId):
-        return (path: "/2/users/\(sourceUserId)/blocking/\(targetUserId)", queryItems: nil)
-        
-      case .muting(let id):
-        return (path: "/2/users/\(id)/muting", queryItems: nil)
-      case .deleteMute(let sourceUserId, let targetUserId):
-        return (path: "/2/users/\(sourceUserId)/muting/\(targetUserId)", queryItems: nil)
-        
-      case .volumeStream:
-        return (path: "/2/tweets/sample/stream", queryItems: nil)
-      case .filteredStream:
-        return (path: "/2/tweets/search/stream", queryItems: nil)
-      case .filteredStreamRules:
-        return (path: "/2/tweets/search/stream/rules", queryItems: nil)
-      case .searchRecent:
-        return (path: "/2/tweets/search/recent", queryItems: nil)
-      case .searchAll:
-        return (path: "/2/tweets/search/all", queryItems: nil)
-        
-      case .userLikes(let id):
-        return (path: "/2/users/\(id)/likes", queryItems: nil)
-      case .deleteUserLikes(let userId, let tweetId):
-        return (path: "/2/users/\(userId)/likes/\(tweetId)", queryItems: nil)
-      case .likingUsers(let id):
-        return (path: "/2/tweets/\(id)/liking_users", queryItems: nil)
-      case .likedTweets(let id):
-        return (path: "/2/users/\(id)/liked_tweets", queryItems: nil)
-        
-      case .retweets(let userId, let tweetId):
-        if let tweetId = tweetId {
-          return (path: "/2/users/\(userId)/retweets/\(tweetId)", queryItems: nil)
-        } else {
-          return (path: "/2/users/\(userId)/retweets", queryItems: nil)
-        }
-      case .retweetedBy(let id):
-        return (path: "/2/tweets/\(id)/retweeted_by", queryItems: nil)
-        
-      case .quoteTweets(let id):
-        return (path: "/2/tweets/\(id)/quote_tweets", queryItems: nil)
-        
-      case .list(let id):
-        return (path: "/2/lists/\(id)", queryItems: nil)
-      case .listTweets(let id):
-        return (path: "/2/lists/\(id)/tweets", queryItems: nil)
-      case .listFollowers(let id):
-        return (path: "/2/lists/\(id)/followers", queryItems: nil)
-      case .userOwnedLists(let id):
-        return (path: "/2/users/\(id)/owned_lists", queryItems: nil)
-      case .userListMemberships(let id):
-        return (path: "/2/users/\(id)/list_memberships", queryItems: nil)
-      case .listMembers(let id):
-        return (path: "/2/lists/\(id)/members", queryItems: nil)
-      case .removeListMember(let listId, let userId):
-        return (path: "/2/lists/\(listId)/members/\(userId)", queryItems: nil)
-        
-      case .userPinnedLists(let userId, let listId):
-        if let listId = listId {
-          return (path: "/2/users/\(userId)/pinned_lists/\(listId)", queryItems: nil)
-        } else {
-          return (path: "/2/users/\(userId)/pinned_lists", queryItems: nil)
-        }
-      case .createList:
-          return (path: "/2/lists", queryItems: nil)
-      case .userFollowingLists(let userId, let listId):
-        if let listId = listId {
-          return (path: "/2/users/\(userId)/followed_lists/\(listId)", queryItems: nil)
-        } else {
-          return (path: "/2/users/\(userId)/followed_lists", queryItems: nil)
-        }
-        
-      case .spaces(let id, let subpath):
-        if let id = id {
-          return (path: "/2/spaces/\(id)\(subpath == nil ? "" : "/\(subpath!.rawValue)")", queryItems: nil)
-        } else {
-          return (path: "/2/spaces/", queryItems: nil)
-        }
-        
-      case .searchSpaces:
-        return (path: "/2/spaces/search", queryItems: nil)
-      case.spacesByCreatorIds:
-        return (path: "/2/spaces/by/creator_ids", queryItems: nil)
-        
-      case .mediaMetadataCreate:
-        return (path: "/1.1/media/metadata/create.json", queryItems: nil)
-        
-      case .bookmarks(let userId):
-        return (path: "/2/users/\(userId)/bookmarks", queryItems: nil)
-      case .deleteBookmark(let userId, let tweetId):
-        return (path: "/2/users/\(userId)/bookmarks/\(tweetId)", queryItems: nil)
-      }
     }
   }
   
