@@ -300,7 +300,7 @@ extension Twift {
         case .deleteBookmark(let userId, let tweetId):
             return (path: "/2/users/\(userId)/bookmarks/\(tweetId)", queryItems: nil)
         case .dmConversations:
-          return (path: "/2/dm_conversations", queryItems: nil)
+          return (path: "/2/dm_events", queryItems: nil)
         case .sendDM(let conversationId):
           return (path: "/2/dm_conversations/\(conversationId)/messages", queryItems: nil)
             
