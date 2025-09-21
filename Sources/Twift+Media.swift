@@ -12,7 +12,206 @@ public enum MediaCategory: String {
 }
 
 extension Twift {
-  // MARK: Chunked Media Upload
+  // MARK: Media Upload v2
+
+  public func uploadMediaV2(mediaData: Data,
+                            mimeType: String,
+                            category: MediaCategory,
+                            chunkSize: Int = 4 * 1024 * 1024) async throws -> MediaUploadV2Response {
+    try await performMediaUploadV2(totalBytes: mediaData.count,
+                                   mimeType: mimeType,
+                                   category: category) { mediaId in
+      try await self.appendMediaChunksV2(mediaId: mediaId,
+                                         data: mediaData,
+                                         chunkSize: chunkSize)
+    }
+  }
+
+  public func uploadMediaV2(fileURL: URL,
+                            mimeType: String,
+                            category: MediaCategory,
+                            chunkSize: Int = 4 * 1024 * 1024) async throws -> MediaUploadV2Response {
+    let totalBytes = try totalBytesForMedia(fileURL: fileURL)
+    return try await performMediaUploadV2(totalBytes: totalBytes,
+                                          mimeType: mimeType,
+                                          category: category) { mediaId in
+      try await self.appendMediaChunksV2(mediaId: mediaId,
+                                         fileURL: fileURL,
+                                         chunkSize: chunkSize)
+    }
+  }
+
+  fileprivate func performMediaUploadV2(totalBytes: Int,
+                                        mimeType: String,
+                                        category: MediaCategory,
+                                        chunkUploader: (Media.ID) async throws -> Void) async throws -> MediaUploadV2Response {
+    guard totalBytes > 0 else {
+      throw TwiftError.UnknownError("Media upload requires data with a positive length.")
+    }
+
+    if case .oauth2UserAuth(_, _) = self.authenticationType {
+      try await refreshOAuth2AccessToken()
+    }
+
+    let initResponse = try await initializeMediaUploadV2(totalBytes: totalBytes,
+                                                         mimeType: mimeType,
+                                                         category: category)
+    let mediaId = initResponse.data.id
+
+    try await chunkUploader(mediaId)
+
+    let finalizeResponse = try await finalizeMediaUploadV2(mediaId: mediaId)
+    return try await waitForProcessingIfNeeded(mediaId: mediaId, startingWith: finalizeResponse)
+  }
+
+  fileprivate func initializeMediaUploadV2(totalBytes: Int,
+                                           mimeType: String,
+                                           category: MediaCategory) async throws -> MediaUploadV2Response {
+    let queryItems = [
+      URLQueryItem(name: "command", value: "INIT"),
+      URLQueryItem(name: "media_type", value: mimeType),
+      URLQueryItem(name: "total_bytes", value: "\(totalBytes)"),
+      URLQueryItem(name: "media_category", value: category.rawValue)
+    ]
+
+    return try await call(route: .mediaUpload,
+                          method: .POST,
+                          queryItems: queryItems)
+  }
+
+  fileprivate func finalizeMediaUploadV2(mediaId: Media.ID) async throws -> MediaUploadV2Response {
+    let queryItems = [
+      URLQueryItem(name: "command", value: "FINALIZE"),
+      URLQueryItem(name: "media_id", value: mediaId)
+    ]
+
+    return try await call(route: .mediaUpload,
+                          method: .POST,
+                          queryItems: queryItems)
+  }
+
+  fileprivate func mediaUploadStatusV2(mediaId: Media.ID) async throws -> MediaUploadV2Response {
+    let queryItems = [
+      URLQueryItem(name: "command", value: "STATUS"),
+      URLQueryItem(name: "media_id", value: mediaId)
+    ]
+
+    return try await call(route: .mediaUpload,
+                          method: .GET,
+                          queryItems: queryItems)
+  }
+
+  fileprivate func waitForProcessingIfNeeded(mediaId: Media.ID,
+                                             startingWith response: MediaUploadV2Response) async throws -> MediaUploadV2Response {
+    var latestResponse = response
+
+    while let processingInfo = latestResponse.data.processingInfo {
+      switch processingInfo.state {
+      case .succeeded:
+        return latestResponse
+      case .failed:
+        let errorMessage = processingInfo.error?.message ?? "Media processing failed."
+        throw TwiftError.UnknownError(errorMessage)
+      case .pending, .inProgress:
+        let waitSeconds = UInt64(max(processingInfo.checkAfterSecs ?? 1, 1))
+        try await Task.sleep(nanoseconds: waitSeconds * 1_000_000_000)
+        latestResponse = try await mediaUploadStatusV2(mediaId: mediaId)
+      }
+    }
+
+    return latestResponse
+  }
+
+  fileprivate func appendMediaChunksV2(mediaId: Media.ID,
+                                       data: Data,
+                                       chunkSize: Int) async throws {
+    guard data.count > 0 else { return }
+    let chunkSize = max(chunkSize, 1)
+    var offset = 0
+    var segmentIndex = 0
+
+    while offset < data.count {
+      let end = min(offset + chunkSize, data.count)
+      let chunk = data.subdata(in: offset..<end)
+      try await appendMediaChunkV2(mediaId: mediaId,
+                                   chunk: chunk,
+                                   segmentIndex: segmentIndex)
+      offset = end
+      segmentIndex += 1
+    }
+  }
+
+  fileprivate func appendMediaChunksV2(mediaId: Media.ID,
+                                       fileURL: URL,
+                                       chunkSize: Int) async throws {
+    let chunkSize = max(chunkSize, 1)
+    let fileHandle = try FileHandle(forReadingFrom: fileURL)
+    defer { try? fileHandle.close() }
+
+    var segmentIndex = 0
+    while true {
+      let chunk: Data = autoreleasepool(invoking: {
+        fileHandle.readData(ofLength: chunkSize)
+      })
+
+      if chunk.isEmpty {
+        break
+      }
+
+      try await appendMediaChunkV2(mediaId: mediaId,
+                                   chunk: chunk,
+                                   segmentIndex: segmentIndex)
+      segmentIndex += 1
+    }
+  }
+
+  fileprivate func appendMediaChunkV2(mediaId: Media.ID,
+                                      chunk: Data,
+                                      segmentIndex: Int) async throws {
+    guard !chunk.isEmpty else { return }
+
+    let url = getURL(for: .mediaUpload)
+    var request = URLRequest(url: url)
+    let boundary = "Boundary-\(UUID().uuidString)"
+    request.addValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+
+    var body = Data()
+    appendFormField(name: "command", value: "APPEND", to: &body, boundary: boundary)
+    appendFormField(name: "media_id", value: mediaId, to: &body, boundary: boundary)
+    appendFormField(name: "segment_index", value: "\(segmentIndex)", to: &body, boundary: boundary)
+    appendFileField(name: "media", filename: "chunk", contentType: "application/octet-stream", data: chunk, to: &body, boundary: boundary)
+    body.appendString("--\(boundary)--\r\n")
+
+    request.httpBody = body
+
+    signURLRequest(method: .POST, body: body, request: &request)
+
+    let (_, response) = try await URLSession.shared.data(for: request)
+
+    guard let httpResponse = response as? HTTPURLResponse,
+          (200...299).contains(httpResponse.statusCode) else {
+      throw TwiftError.UnknownError(response)
+    }
+  }
+
+  fileprivate func totalBytesForMedia(fileURL: URL) throws -> Int {
+    if let resourceValues = try? fileURL.resourceValues(forKeys: [.fileSizeKey]),
+       let fileSize = resourceValues.fileSize {
+      return fileSize
+    }
+
+    let attributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+    if let sizeNumber = attributes[.size] as? NSNumber {
+      return Int(truncating: sizeNumber)
+    }
+    if let sizeValue = attributes[.size] as? Int {
+      return sizeValue
+    }
+
+    throw TwiftError.UnknownError("Unable to determine file size for media upload.")
+  }
+
+  // MARK: Chunked Media Upload (Legacy)
   /// Uploads media data and returns an ID string that can be used to attach media to Tweets
   /// - Warning: This method relies on Twitter's v1.1 media API endpoints and only supports OAuth 1.0a authentication.
   /// - Parameters:
@@ -306,4 +505,63 @@ public struct MediaUploadResponse: Codable {
       public let message: String?
     }
   }
+}
+
+/// A response object representing uploads performed via the v2 media endpoint
+public struct MediaUploadV2Response: Codable {
+  public struct Payload: Codable {
+    public let id: Media.ID
+    public let mediaKey: Media.ID?
+    public let expiresAfterSecs: Int?
+    public let processingInfo: ProcessingInfo?
+  }
+
+  public struct ProcessingInfo: Codable {
+    public enum State: String, Codable {
+      case pending
+      case inProgress = "in_progress"
+      case failed
+      case succeeded
+    }
+
+    public struct ProcessingError: Codable {
+      public let code: Int?
+      public let name: String?
+      public let message: String?
+    }
+
+    public let state: State
+    public let checkAfterSecs: Int?
+    public let progressPercent: Int?
+    public let error: ProcessingError?
+  }
+
+  public let data: Payload
+}
+
+fileprivate extension Data {
+  mutating func appendString(_ string: String) {
+    if let stringData = string.data(using: .utf8) {
+      append(stringData)
+    }
+  }
+}
+
+fileprivate func appendFormField(name: String, value: String, to body: inout Data, boundary: String) {
+  body.appendString("--\(boundary)\r\n")
+  body.appendString("Content-Disposition: form-data; name=\"\(name)\"\r\n\r\n")
+  body.appendString("\(value)\r\n")
+}
+
+fileprivate func appendFileField(name: String,
+                                 filename: String,
+                                 contentType: String,
+                                 data: Data,
+                                 to body: inout Data,
+                                 boundary: String) {
+  body.appendString("--\(boundary)\r\n")
+  body.appendString("Content-Disposition: form-data; name=\"\(name)\"; filename=\"\(filename)\"\r\n")
+  body.appendString("Content-Type: \(contentType)\r\n\r\n")
+  body.append(data)
+  body.appendString("\r\n")
 }

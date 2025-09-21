@@ -161,6 +161,7 @@ extension Twift {
     case spacesByCreatorIds
     
     case mediaMetadataCreate
+    case mediaUpload
     
     case bookmarks(_ userId: User.ID)
     case deleteBookmark(userId: User.ID, tweetId: Tweet.ID)
@@ -294,6 +295,8 @@ extension Twift {
             
         case .mediaMetadataCreate:
             return (path: "/1.1/media/metadata/create.json", queryItems: nil)
+        case .mediaUpload:
+            return (path: "/2/media/upload", queryItems: nil)
             
         case .bookmarks(let userId):
             return (path: "/2/users/\(userId)/bookmarks", queryItems: nil)
