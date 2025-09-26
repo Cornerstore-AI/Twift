@@ -8,10 +8,11 @@ public struct DirectMessage: Codable, Identifiable {
     public let senderAvatar: String?
     public let createdAt: Date
     public let conversationId: String
+    public let participantIds: [String]?
 }
 
 public extension Twift {
-    func getDMConversations() async throws -> TwitterAPIData<[DirectMessage]> {
+    func getDMConversations() async throws -> TwitterAPIDataAndMeta<[DirectMessage], Meta> {
         try await call(route: .dmConversations)
     }
 

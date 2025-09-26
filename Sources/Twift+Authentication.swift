@@ -381,7 +381,10 @@ public enum OAuth2Scope: String, CaseIterable, RawRepresentable {
   
   /// Bookmark and remove Bookmarks from Tweets
   case bookmarkWrite = "bookmark.write"
-    
+
+  /// Upload media to Twitter on your behalf.
+  case mediaWrite = "media.write"
+
   /// Get DMs from an authenticated user.
   case dmRead = "dm.read"
 
@@ -390,7 +393,7 @@ public enum OAuth2Scope: String, CaseIterable, RawRepresentable {
   
   /// All write-permission scopes.
   static var allWriteScopes: Set<OAuth2Scope> {
-      [.likeWrite, .listWrite, .muteWrite, .blockWrite, .tweetWrite, .followsWrite, .bookmarkWrite, .tweetModerateWrite, .dmWrite]
+      [.likeWrite, .listWrite, .muteWrite, .blockWrite, .tweetWrite, .followsWrite, .bookmarkWrite, .tweetModerateWrite, .dmWrite, .mediaWrite]
   }
   
   /// All read-permission scopes.

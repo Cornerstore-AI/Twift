@@ -17,10 +17,65 @@ extension Twift {
   public func uploadMediaV2(mediaData: Data,
                             mimeType: String,
                             category: MediaCategory,
-                            chunkSize: Int = 4 * 1024 * 1024) async throws -> MediaUploadV2Response {
-    try await performMediaUploadV2(totalBytes: mediaData.count,
-                                   mimeType: mimeType,
-                                   category: category) { mediaId in
+                            chunkSize: Int = 4 * 1024 * 1024,
+                            shared: Bool = false) async throws -> MediaUploadV2Response {
+    guard mediaData.count > 0 else {
+      throw TwiftError.UnknownError("Media upload requires data with a positive length.")
+    }
+
+    let normalizedMimeType = mimeType.lowercased()
+    let chunkedCategory: MediaCategory = {
+      if category == .tweetImage && normalizedMimeType.contains("gif") {
+#if DEBUG
+        print("Twift: Detected GIF mime type during media upload. Forcing chunked upload category to tweet_gif.")
+#endif
+        return .tweetGif
+      }
+
+      return category
+    }()
+
+    var simpleUploadLastError: Error?
+
+    if chunkedCategory == .tweetImage && normalizedMimeType.hasPrefix("image/") {
+      let maxRetryCount = 5
+      var lastError: Error?
+
+      for attempt in 0...maxRetryCount {
+#if DEBUG
+        print("Twift: Attempting simple image upload (attempt \(attempt + 1) of \(maxRetryCount + 1); \(mediaData.count) bytes, shared: \(shared)).")
+#endif
+        do {
+          let response = try await uploadSimpleImageV2(mediaData: mediaData,
+                                                       shared: shared,
+                                                       category: category)
+#if DEBUG
+          print("Twift: Simple image upload succeeded with media id \(response.data.id) on attempt \(attempt + 1).")
+#endif
+          return response
+        } catch let cancellationError as CancellationError {
+          throw cancellationError
+        } catch {
+          lastError = error
+#if DEBUG
+          print("Twift: Simple image upload attempt \(attempt + 1) failed with error: \(error).")
+#endif
+        }
+      }
+
+      simpleUploadLastError = lastError
+    }
+
+    if let simpleUploadLastError {
+#if DEBUG
+      print("Twift: Simple image upload failed after retries with error: \(simpleUploadLastError). Falling back to chunked upload.")
+#endif
+    }
+
+    return try await performMediaUploadV2(totalBytes: mediaData.count,
+                                          mimeType: mimeType,
+                                          category: chunkedCategory,
+                                          shared: shared) { mediaId in
       try await self.appendMediaChunksV2(mediaId: mediaId,
                                          data: mediaData,
                                          chunkSize: chunkSize)
@@ -30,11 +85,22 @@ extension Twift {
   public func uploadMediaV2(fileURL: URL,
                             mimeType: String,
                             category: MediaCategory,
-                            chunkSize: Int = 4 * 1024 * 1024) async throws -> MediaUploadV2Response {
+                            chunkSize: Int = 4 * 1024 * 1024,
+                            shared: Bool = false) async throws -> MediaUploadV2Response {
+    if category == .tweetImage && mimeType.lowercased().hasPrefix("image/") {
+      let mediaData = try Data(contentsOf: fileURL)
+      return try await uploadMediaV2(mediaData: mediaData,
+                                     mimeType: mimeType,
+                                     category: category,
+                                     chunkSize: chunkSize,
+                                     shared: shared)
+    }
+
     let totalBytes = try totalBytesForMedia(fileURL: fileURL)
     return try await performMediaUploadV2(totalBytes: totalBytes,
                                           mimeType: mimeType,
-                                          category: category) { mediaId in
+                                          category: category,
+                                          shared: shared) { mediaId in
       try await self.appendMediaChunksV2(mediaId: mediaId,
                                          fileURL: fileURL,
                                          chunkSize: chunkSize)
@@ -44,6 +110,7 @@ extension Twift {
   fileprivate func performMediaUploadV2(totalBytes: Int,
                                         mimeType: String,
                                         category: MediaCategory,
+                                        shared: Bool,
                                         chunkUploader: (Media.ID) async throws -> Void) async throws -> MediaUploadV2Response {
     guard totalBytes > 0 else {
       throw TwiftError.UnknownError("Media upload requires data with a positive length.")
@@ -55,7 +122,8 @@ extension Twift {
 
     let initResponse = try await initializeMediaUploadV2(totalBytes: totalBytes,
                                                          mimeType: mimeType,
-                                                         category: category)
+                                                         category: category,
+                                                         shared: shared)
     let mediaId = initResponse.data.id
 
     try await chunkUploader(mediaId)
@@ -64,41 +132,58 @@ extension Twift {
     return try await waitForProcessingIfNeeded(mediaId: mediaId, startingWith: finalizeResponse)
   }
 
-  fileprivate func initializeMediaUploadV2(totalBytes: Int,
-                                           mimeType: String,
-                                           category: MediaCategory) async throws -> MediaUploadV2Response {
-    let queryItems = [
-      URLQueryItem(name: "command", value: "INIT"),
-      URLQueryItem(name: "media_type", value: mimeType),
-      URLQueryItem(name: "total_bytes", value: "\(totalBytes)"),
-      URLQueryItem(name: "media_category", value: category.rawValue)
-    ]
-
+  fileprivate func uploadSimpleImageV2(mediaData: Data,
+                                       shared: Bool,
+                                       category: MediaCategory) async throws -> MediaUploadV2Response {
+    let payload = SimpleMediaUploadPayload(shared: shared,
+                                           media: mediaData.base64EncodedString(),
+                                           mediaCategory: category.rawValue)
+    let body = try JSONEncoder().encode(payload)
     return try await call(route: .mediaUpload,
                           method: .POST,
-                          queryItems: queryItems)
+                          body: body)
+  }
+
+  fileprivate func initializeMediaUploadV2(totalBytes: Int,
+                                           mimeType: String,
+                                           category: MediaCategory,
+                                           shared: Bool) async throws -> MediaUploadV2Response {
+    let payload = MediaUploadInitializePayload(mediaType: mimeType,
+                                               totalBytes: totalBytes,
+                                               mediaCategory: category.rawValue,
+                                               shared: shared ? true : nil,
+                                               additionalOwners: nil)
+    let body = try JSONEncoder().encode(payload)
+    let logBodyDescription = "media_type=\(mimeType), media_category=\(category.rawValue), total_bytes=\(totalBytes), shared=\(shared)"
+
+    let data = try await executeMediaUploadRequest(step: "INIT",
+                                                   route: .mediaUploadInitialize,
+                                                   method: .POST,
+                                                   body: body,
+                                                   additionalHeaders: ["Content-Type": "application/json"],
+                                                   bodyLogDescription: logBodyDescription)
+    return try decodeOrThrow(decodingType: MediaUploadV2Response.self, data: data)
   }
 
   fileprivate func finalizeMediaUploadV2(mediaId: Media.ID) async throws -> MediaUploadV2Response {
-    let queryItems = [
-      URLQueryItem(name: "command", value: "FINALIZE"),
-      URLQueryItem(name: "media_id", value: mediaId)
-    ]
-
-    return try await call(route: .mediaUpload,
-                          method: .POST,
-                          queryItems: queryItems)
+    let data = try await executeMediaUploadRequest(step: "FINALIZE",
+                                                   route: .mediaUploadFinalize(mediaId: mediaId),
+                                                   method: .POST,
+                                                   bodyLogDescription: "media_id=\(mediaId)")
+    return try decodeOrThrow(decodingType: MediaUploadV2Response.self, data: data)
   }
 
   fileprivate func mediaUploadStatusV2(mediaId: Media.ID) async throws -> MediaUploadV2Response {
     let queryItems = [
-      URLQueryItem(name: "command", value: "STATUS"),
-      URLQueryItem(name: "media_id", value: mediaId)
+      URLQueryItem(name: "media_id", value: mediaId),
+      URLQueryItem(name: "command", value: "STATUS")
     ]
 
-    return try await call(route: .mediaUpload,
-                          method: .GET,
-                          queryItems: queryItems)
+    let data = try await executeMediaUploadRequest(step: "STATUS",
+                                                   route: .mediaUpload,
+                                                   method: .GET,
+                                                   queryItems: queryItems)
+    return try decodeOrThrow(decodingType: MediaUploadV2Response.self, data: data)
   }
 
   fileprivate func waitForProcessingIfNeeded(mediaId: Media.ID,
@@ -122,46 +207,149 @@ extension Twift {
     return latestResponse
   }
 
+  @discardableResult
+  fileprivate func executeMediaUploadRequest(step: String,
+                                             route: APIRoute,
+                                             method: HTTPMethod,
+                                             queryItems: [URLQueryItem] = [],
+                                             body: Data? = nil,
+                                             additionalHeaders: [String: String] = [:],
+                                             bodyLogDescription: String? = nil) async throws -> Data {
+    let url = getURL(for: route, queryItems: queryItems)
+    var request = URLRequest(url: url)
+
+    if let body = body {
+      request.httpBody = body
+    }
+
+    if !additionalHeaders.isEmpty {
+      for (field, value) in additionalHeaders {
+        request.setValue(value, forHTTPHeaderField: field)
+      }
+    }
+
+    if body != nil && additionalHeaders["Content-Type"] == nil {
+      request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    }
+
+    signURLRequest(method: method, body: body, request: &request)
+
+    logMediaUploadRequest(step: step, request: request, bodyDescription: bodyLogDescription)
+
+    let (data, response) = try await URLSession.shared.data(for: request)
+    guard let httpResponse = response as? HTTPURLResponse else {
+      throw TwiftError.UnknownError("Unexpected response for \(step)")
+    }
+
+    logMediaUploadResponse(step: step, response: httpResponse, responseData: data)
+
+    guard (200...299).contains(httpResponse.statusCode) else {
+      throw TwiftError.UnknownError(httpResponse)
+    }
+
+    return data
+  }
+
   fileprivate func appendMediaChunksV2(mediaId: Media.ID,
                                        data: Data,
                                        chunkSize: Int) async throws {
     guard data.count > 0 else { return }
-    let chunkSize = max(chunkSize, 1)
-    var offset = 0
-    var segmentIndex = 0
+    try await appendMediaChunksV2(mediaId: mediaId,
+                                  data: data,
+                                  chunkSize: chunkSize,
+                                  allowRetryOn413: true)
+  }
 
-    while offset < data.count {
-      let end = min(offset + chunkSize, data.count)
-      let chunk = data.subdata(in: offset..<end)
-      try await appendMediaChunkV2(mediaId: mediaId,
-                                   chunk: chunk,
-                                   segmentIndex: segmentIndex)
-      offset = end
-      segmentIndex += 1
+  fileprivate func appendMediaChunksV2(mediaId: Media.ID,
+                                       data: Data,
+                                       chunkSize: Int,
+                                       allowRetryOn413: Bool) async throws {
+    let chunkSize = max(chunkSize, 1)
+
+    do {
+      var offset = 0
+      var segmentIndex = 0
+
+      while offset < data.count {
+        let end = min(offset + chunkSize, data.count)
+        let chunk = data.subdata(in: offset..<end)
+        try await appendMediaChunkV2(mediaId: mediaId,
+                                     chunk: chunk,
+                                     segmentIndex: segmentIndex)
+        offset = end
+        segmentIndex += 1
+      }
+    } catch {
+      if allowRetryOn413,
+         let response = httpResponse(from: error),
+         response.statusCode == 413 {
+        let halvedChunkSize = max(chunkSize / 2, 1)
+        guard halvedChunkSize < chunkSize else { throw error }
+#if DEBUG
+        print("Twift: Received HTTP 413 while uploading in-memory media chunk. Retrying once with reduced chunk size (\(chunkSize) -> \(halvedChunkSize) bytes).")
+#endif
+        try await appendMediaChunksV2(mediaId: mediaId,
+                                      data: data,
+                                      chunkSize: halvedChunkSize,
+                                      allowRetryOn413: false)
+        return
+      }
+
+      throw error
     }
   }
 
   fileprivate func appendMediaChunksV2(mediaId: Media.ID,
                                        fileURL: URL,
                                        chunkSize: Int) async throws {
+    try await appendMediaChunksV2(mediaId: mediaId,
+                                  fileURL: fileURL,
+                                  chunkSize: chunkSize,
+                                  allowRetryOn413: true)
+  }
+
+  fileprivate func appendMediaChunksV2(mediaId: Media.ID,
+                                       fileURL: URL,
+                                       chunkSize: Int,
+                                       allowRetryOn413: Bool) async throws {
     let chunkSize = max(chunkSize, 1)
-    let fileHandle = try FileHandle(forReadingFrom: fileURL)
-    defer { try? fileHandle.close() }
 
-    var segmentIndex = 0
-    while true {
-      let chunk: Data = autoreleasepool(invoking: {
-        fileHandle.readData(ofLength: chunkSize)
-      })
+    do {
+      let fileHandle = try FileHandle(forReadingFrom: fileURL)
+      defer { try? fileHandle.close() }
 
-      if chunk.isEmpty {
-        break
+      var segmentIndex = 0
+      while true {
+        let chunk: Data = autoreleasepool(invoking: {
+          fileHandle.readData(ofLength: chunkSize)
+        })
+
+        if chunk.isEmpty {
+          break
+        }
+
+        try await appendMediaChunkV2(mediaId: mediaId,
+                                     chunk: chunk,
+                                     segmentIndex: segmentIndex)
+        segmentIndex += 1
+      }
+    } catch {
+      if allowRetryOn413,
+         let response = httpResponse(from: error),
+         response.statusCode == 413 {
+        let halvedChunkSize = max(chunkSize / 2, 1)
+        guard halvedChunkSize < chunkSize else { throw error }
+#if DEBUG
+        print("Twift: Received HTTP 413 while uploading media chunk from file. Retrying once with reduced chunk size (\(chunkSize) -> \(halvedChunkSize) bytes).")
+#endif
+        try await appendMediaChunksV2(mediaId: mediaId,
+                                      fileURL: fileURL,
+                                      chunkSize: halvedChunkSize,
+                                      allowRetryOn413: false)
+        return
       }
 
-      try await appendMediaChunkV2(mediaId: mediaId,
-                                   chunk: chunk,
-                                   segmentIndex: segmentIndex)
-      segmentIndex += 1
+      throw error
     }
   }
 
@@ -169,29 +357,31 @@ extension Twift {
                                       chunk: Data,
                                       segmentIndex: Int) async throws {
     guard !chunk.isEmpty else { return }
+    let encodedChunk = chunk.base64EncodedString()
+    let payload = MediaUploadAppendPayload(media: encodedChunk,
+                                           segmentIndex: segmentIndex)
+    let body = try JSONEncoder().encode(payload)
+    let logDescription = "segment_index=\(segmentIndex), media_bytes=\(chunk.count), media_base64_length=\(encodedChunk.count)"
 
-    let url = getURL(for: .mediaUpload)
-    var request = URLRequest(url: url)
-    let boundary = "Boundary-\(UUID().uuidString)"
-    request.addValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+    _ = try await executeMediaUploadRequest(step: "APPEND segment \(segmentIndex)",
+                                            route: .mediaUploadAppend(mediaId: mediaId),
+                                            method: .POST,
+                                            body: body,
+                                            additionalHeaders: ["Content-Type": "application/json"],
+                                            bodyLogDescription: logDescription)
+  }
 
-    var body = Data()
-    appendFormField(name: "command", value: "APPEND", to: &body, boundary: boundary)
-    appendFormField(name: "media_id", value: mediaId, to: &body, boundary: boundary)
-    appendFormField(name: "segment_index", value: "\(segmentIndex)", to: &body, boundary: boundary)
-    appendFileField(name: "media", filename: "chunk", contentType: "application/octet-stream", data: chunk, to: &body, boundary: boundary)
-    body.appendString("--\(boundary)--\r\n")
-
-    request.httpBody = body
-
-    signURLRequest(method: .POST, body: body, request: &request)
-
-    let (_, response) = try await URLSession.shared.data(for: request)
-
-    guard let httpResponse = response as? HTTPURLResponse,
-          (200...299).contains(httpResponse.statusCode) else {
-      throw TwiftError.UnknownError(response)
+  fileprivate func httpResponse(from error: Error) -> HTTPURLResponse? {
+    guard let twiftError = error as? TwiftError else {
+      return nil
     }
+
+    if case .UnknownError(let context) = twiftError,
+       let response = context as? HTTPURLResponse {
+      return response
+    }
+
+    return nil
   }
 
   fileprivate func totalBytesForMedia(fileURL: URL) throws -> Int {
@@ -539,29 +729,68 @@ public struct MediaUploadV2Response: Codable {
   public let data: Payload
 }
 
-fileprivate extension Data {
-  mutating func appendString(_ string: String) {
-    if let stringData = string.data(using: .utf8) {
-      append(stringData)
-    }
+fileprivate struct SimpleMediaUploadPayload: Encodable {
+  let shared: Bool
+  let media: String
+  let mediaCategory: String
+
+  enum CodingKeys: String, CodingKey {
+    case shared
+    case media
+    case mediaCategory = "media_category"
   }
 }
 
-fileprivate func appendFormField(name: String, value: String, to body: inout Data, boundary: String) {
-  body.appendString("--\(boundary)\r\n")
-  body.appendString("Content-Disposition: form-data; name=\"\(name)\"\r\n\r\n")
-  body.appendString("\(value)\r\n")
+fileprivate struct MediaUploadInitializePayload: Encodable {
+  let mediaType: String
+  let totalBytes: Int
+  let mediaCategory: String
+  let shared: Bool?
+  let additionalOwners: [String]?
+
+  enum CodingKeys: String, CodingKey {
+    case mediaType = "media_type"
+    case totalBytes = "total_bytes"
+    case mediaCategory = "media_category"
+    case shared
+    case additionalOwners = "additional_owners"
+  }
 }
 
-fileprivate func appendFileField(name: String,
-                                 filename: String,
-                                 contentType: String,
-                                 data: Data,
-                                 to body: inout Data,
-                                 boundary: String) {
-  body.appendString("--\(boundary)\r\n")
-  body.appendString("Content-Disposition: form-data; name=\"\(name)\"; filename=\"\(filename)\"\r\n")
-  body.appendString("Content-Type: \(contentType)\r\n\r\n")
-  body.append(data)
-  body.appendString("\r\n")
+fileprivate struct MediaUploadAppendPayload: Encodable {
+  let media: String
+  let segmentIndex: Int
+
+  enum CodingKeys: String, CodingKey {
+    case media
+    case segmentIndex = "segment_index"
+  }
 }
+
+fileprivate func logMediaUploadRequest(step: String, request: URLRequest, bodyDescription: String?) {
+  let method = request.httpMethod ?? "UNKNOWN"
+  let urlString = request.url?.absoluteString ?? "unknown URL"
+  let headers = sanitizeRequestHeaders(request.allHTTPHeaderFields)
+
+  print("📤 [TwiftMedia][\(step)] Request: \(method) \(urlString)")
+  if !headers.isEmpty {
+    print("📤 [TwiftMedia][\(step)] Headers: \(headers)")
+  }
+
+  if let bodyDescription {
+    print("📤 [TwiftMedia][\(step)] Body: \(bodyDescription)")
+  } else if let body = request.httpBody {
+    print("📤 [TwiftMedia][\(step)] Body bytes: \(body.count)")
+  }
+}
+
+fileprivate func logMediaUploadResponse(step: String, response: HTTPURLResponse, responseData: Data) {
+  let urlString = response.url?.absoluteString ?? "unknown URL"
+  let headers = sanitizeResponseHeaders(response.allHeaderFields)
+
+  print("📥 [TwiftMedia][\(step)] Response: \(response.statusCode) \(urlString) body=\(responseData.count) bytes")
+  if !headers.isEmpty {
+    print("📥 [TwiftMedia][\(step)] Response Headers: \(headers)")
+  }
+}
+

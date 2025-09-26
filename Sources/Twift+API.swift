@@ -17,7 +17,18 @@ extension Twift {
     
     let url = getURL(for: route, queryItems: queryItems)
     var request = URLRequest(url: url)
+
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+
+    let shouldLogTraffic: Bool
+    if case .dmConversations = route {
+      shouldLogTraffic = true
+    } else {
+      shouldLogTraffic = false
+    }
     
+
     if let body = body {
       request.httpBody = body
       request.addValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -25,8 +36,16 @@ extension Twift {
     
     signURLRequest(method: method, body: body, request: &request)
 
-    let (data, _) = try await URLSession.shared.data(for: request)
-    
+    if shouldLogTraffic {
+      logStandardAPIRequest(tag: "TwiftDM", request: request)
+    }
+
+    let (data, response) = try await URLSession.shared.data(for: request)
+
+    if shouldLogTraffic, let httpResponse = response as? HTTPURLResponse {
+      logStandardAPIResponse(tag: "TwiftDM", response: httpResponse, responseData: data)
+    }
+
     return try decodeOrThrow(decodingType: T.self, data: data)
   }
   
@@ -59,7 +78,7 @@ extension Twift {
     
     var components = URLComponents()
     components.scheme = "https"
-    components.host = isTestEnvironment ? "stoplight.io" : "api.twitter.com"
+    components.host = isTestEnvironment ? "stoplight.io" : "api.x.com"
   
     if isTestEnvironment {
       components.path = "/mocks/dte/twitter-v2-api-spec/54953920\(route.resolvedPath.path)"
@@ -162,6 +181,9 @@ extension Twift {
     
     case mediaMetadataCreate
     case mediaUpload
+    case mediaUploadInitialize
+    case mediaUploadAppend(mediaId: String)
+    case mediaUploadFinalize(mediaId: String)
     
     case bookmarks(_ userId: User.ID)
     case deleteBookmark(userId: User.ID, tweetId: Tweet.ID)
@@ -297,17 +319,64 @@ extension Twift {
             return (path: "/1.1/media/metadata/create.json", queryItems: nil)
         case .mediaUpload:
             return (path: "/2/media/upload", queryItems: nil)
+        case .mediaUploadInitialize:
+            return (path: "/2/media/upload/initialize", queryItems: nil)
+        case .mediaUploadAppend(let mediaId):
+            return (path: "/2/media/upload/\(mediaId)/append", queryItems: nil)
+        case .mediaUploadFinalize(let mediaId):
+            return (path: "/2/media/upload/\(mediaId)/finalize", queryItems: nil)
             
         case .bookmarks(let userId):
             return (path: "/2/users/\(userId)/bookmarks", queryItems: nil)
         case .deleteBookmark(let userId, let tweetId):
             return (path: "/2/users/\(userId)/bookmarks/\(tweetId)", queryItems: nil)
         case .dmConversations:
-          return (path: "/2/dm_events", queryItems: nil)
+            let dmEventFieldValues = [
+                "id",
+                "text",
+                "event_type",
+                "created_at",
+                "dm_conversation_id",
+                "sender_id",
+                "participant_ids",
+                "referenced_tweets",
+                "attachments"
+            ]
+
+            let messageCreateFieldValues = [
+                "sender_id",
+                "text",
+                "attachments"
+            ]
+
+            let allDMEventFields = (dmEventFieldValues + messageCreateFieldValues)
+                .reduce(into: [String]()) { uniqueFields, field in
+                    if !uniqueFields.contains(field) {
+                        uniqueFields.append(field)
+                    }
+                }
+                .joined(separator: ",")
+
+            let userFields = [
+                "id",
+                "name",
+                "username",
+                "profile_image_url"
+            ].joined(separator: ",")
+
+            return (
+                path: "/2/dm_events",
+                queryItems: [
+                    URLQueryItem(name: "event_types", value: "MessageCreate"),
+                    URLQueryItem(name: "dm_event.fields", value: allDMEventFields),
+                    URLQueryItem(name: "expansions", value: "sender_id,participant_ids"),
+                    URLQueryItem(name: "user.fields", value: userFields)
+                ]
+            )
         case .sendDM(let conversationId):
-          return (path: "/2/dm_conversations/\(conversationId)/messages", queryItems: nil)
-            
-            
+            return (path: "/2/dm_conversations/\(conversationId)/messages", queryItems: nil)
+
+
         }
     }
   }
